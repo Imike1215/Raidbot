@@ -1,17 +1,19 @@
 import discord
 from discord.ext import commands
 from discord.ui import View, Select
+from aiohttp import web, ClientSession
 import asyncio
 import os
 
+# ---------------- BOT BEÁLLÍTÁS ----------------
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 roles = ["Tank", "DPS", "Healer"]
-role_emojis = {"Tank": "🛡️", "DPS": "⚔️", "Healer": "❤️"}
 status_options = ["Biztos", "Csere"]
+role_emojis = {"Tank": "🛡️", "DPS": "⚔️", "Healer": "❤️"}
 
 active_teams = {}  # team_id -> csapat adatok
 
@@ -19,7 +21,7 @@ active_teams = {}  # team_id -> csapat adatok
 def create_embed(size, max_roles, members_dict):
     embed = discord.Embed(
         title=f"🎯 {size}-fős Csapatkereső",
-        description="Jelentkezz a szerepekre:",
+        description="Jelentkezz a szerepekre a Selectből:",
         color=0x3498db
     )
 
@@ -44,71 +46,54 @@ def create_embed(size, max_roles, members_dict):
     embed.add_field(name="🔄 Csere", value=csere_field, inline=True)
     return embed
 
-# ---------------- MULTI-SELECT VIEW ----------------
-def create_role_select_view(max_roles, members_dict, team_id):
+# ---------------- KOMPAKT SELECT VIEW NEVEKKEL ----------------
+def create_visual_names_view(max_roles, members_dict, team_id):
     view = View(timeout=None)
 
-    # ---------------- Biztos szerep select ----------------
-    biztos_options = [discord.SelectOption(label=role, value=role) for role in roles]
-    biztos_select = Select(
-        placeholder="✅ Válassz Biztos szerepeket",
-        options=biztos_options,
+    # Opciók: ✅/🔄 + szerep + jelenlegi nevek a listában
+    options = []
+    for status in status_options:
+        for role in roles:
+            emoji = "✅" if status == "Biztos" else "🔄"
+            # A kiválasztott nevek zárójelben a Select opcióban
+            current_names = ", ".join([m.display_name for m in members_dict[role][status]]) or "..."
+            label = f"{emoji} {role} ({current_names})"
+            options.append(discord.SelectOption(label=label, value=f"{status}|{role}"))
+
+    select = Select(
+        placeholder="Válassz szerepeket és státuszt",
+        options=options,
         min_values=0,
-        max_values=len(roles)
+        max_values=len(options)
     )
 
-    async def biztos_callback(interaction):
+    async def select_callback(interaction):
         user = interaction.user
         team_data = active_teams[team_id]
 
-        # Töröljük a felhasználót minden szerepből a Biztos listában
+        # Előző választások törlése minden szerepből
         for r in roles:
             if user in team_data["members"][r]["Biztos"]:
                 team_data["members"][r]["Biztos"].remove(user)
-
-        # Új választások hozzáadása
-        for selected_role in biztos_select.values:
-            if len(team_data["members"][selected_role]["Biztos"]) < team_data["max"][selected_role]:
-                team_data["members"][selected_role]["Biztos"].append(user)
-
-        # Embed frissítése
-        embed = create_embed(team_data["size"], team_data["max"], team_data["members"])
-        await team_data["message"].edit(embed=embed, view=create_role_select_view(team_data["max"], team_data["members"], team_id))
-        await interaction.response.defer()
-
-    biztos_select.callback = biztos_callback
-    view.add_item(biztos_select)
-
-    # ---------------- Csere szerep select ----------------
-    csere_options = [discord.SelectOption(label=role, value=role) for role in roles]
-    csere_select = Select(
-        placeholder="🔄 Válassz Csere szerepeket",
-        options=csere_options,
-        min_values=0,
-        max_values=len(roles)
-    )
-
-    async def csere_callback(interaction):
-        user = interaction.user
-        team_data = active_teams[team_id]
-
-        # Töröljük a felhasználót minden szerepből a Csere listában
-        for r in roles:
             if user in team_data["members"][r]["Csere"]:
                 team_data["members"][r]["Csere"].remove(user)
 
         # Új választások hozzáadása
-        for selected_role in csere_select.values:
-            team_data["members"][selected_role]["Csere"].append(user)
+        for value in select.values:
+            status, role = value.split("|")
+            if status == "Biztos" and len(team_data["members"][role]["Biztos"]) < team_data["max"][role]:
+                team_data["members"][role]["Biztos"].append(user)
+            elif status == "Csere":
+                team_data["members"][role]["Csere"].append(user)
 
         # Embed frissítése
         embed = create_embed(team_data["size"], team_data["max"], team_data["members"])
-        await team_data["message"].edit(embed=embed, view=create_role_select_view(team_data["max"], team_data["members"], team_id))
+        # Frissített view a Select-tel
+        await team_data["message"].edit(embed=embed, view=create_visual_names_view(team_data["max"], team_data["members"], team_id))
         await interaction.response.defer()
 
-    csere_select.callback = csere_callback
-    view.add_item(csere_select)
-
+    select.callback = select_callback
+    view.add_item(select)
     return view
 
 # ---------------- TEAM PARANCS ----------------
@@ -124,7 +109,7 @@ async def team(ctx, size: int, tank: int, dps: int, healer: int):
 
     embed = create_embed(size, max_roles, members_dict)
     msg = await ctx.send(embed=embed)
-    view = create_role_select_view(max_roles, members_dict, msg.id)
+    view = create_visual_names_view(max_roles, members_dict, msg.id)
     await msg.edit(view=view)
 
     active_teams[msg.id] = {
@@ -147,8 +132,36 @@ async def close(ctx):
         text += f"**{role}**\n✔ Biztos: {biztos}\n🔄 Csere: {csere}\n\n"
     await ctx.send(text)
 
+# ---------------- DASHBOARD ----------------
+async def dashboard():
+    app = web.Application()
+    app.router.add_get("/", lambda request: web.Response(text="Bot dashboard fut!"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Dashboard fut a {port} porton.")
+
+# ---------------- KEEP-ALIVE ----------------
+async def keep_alive():
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        print("Nincs RENDER_EXTERNAL_URL beállítva.")
+        return
+    async with ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url) as r:
+                    print("KeepAlive:", r.status)
+            except Exception as e:
+                print("KeepAlive hiba:", e)
+            await asyncio.sleep(600)
+
 # ---------------- BOT INDÍTÁS ----------------
 async def main():
+    asyncio.create_task(dashboard())
+    asyncio.create_task(keep_alive())
     token = os.environ["DISCORD_TOKEN"]
     await bot.start(token)
 
