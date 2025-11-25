@@ -12,7 +12,6 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 roles = ["Tank", "DPS", "Healer"]
-status_options = ["Biztos", "Csere"]
 role_emojis = {"Tank": "🛡️", "DPS": "⚔️", "Healer": "❤️"}
 
 active_teams = {}  # team_id -> csapat adatok
@@ -21,7 +20,7 @@ active_teams = {}  # team_id -> csapat adatok
 def create_embed(size, max_roles, members_dict):
     embed = discord.Embed(
         title=f"🎯 {size}-fős Csapatkereső",
-        description="Jelentkezz a szerepekre a Selectből:",
+        description="Válaszd ki a szerepedet:",
         color=0x3498db
     )
 
@@ -46,54 +45,83 @@ def create_embed(size, max_roles, members_dict):
     embed.add_field(name="🔄 Csere", value=csere_field, inline=True)
     return embed
 
-# ---------------- KOMPAKT SELECT VIEW NEVEKKEL ----------------
-def create_visual_names_view(max_roles, members_dict, team_id):
+# ---------------- VIEW KÉSZÍTÉSE ----------------
+def create_dual_select_view(max_roles, members_dict, team_id):
     view = View(timeout=None)
 
-    # Opciók: ✅/🔄 + szerep + jelenlegi nevek a listában
-    options = []
-    for status in status_options:
-        for role in roles:
-            emoji = "✅" if status == "Biztos" else "🔄"
-            # A kiválasztott nevek zárójelben a Select opcióban
-            current_names = ", ".join([m.display_name for m in members_dict[role][status]]) or "..."
-            label = f"{emoji} {role} ({current_names})"
-            options.append(discord.SelectOption(label=label, value=f"{status}|{role}"))
-
-    select = Select(
-        placeholder="Válassz szerepeket és státuszt",
-        options=options,
+    # ---------------- Biztos Select ----------------
+    biztos_options = [discord.SelectOption(label=f"{role_emojis[r]} {r}", value=r) for r in roles]
+    biztos_select = Select(
+        placeholder="✅ Biztos szerep választás",
+        options=biztos_options,
         min_values=0,
-        max_values=len(options)
+        max_values=1
     )
 
-    async def select_callback(interaction):
+    async def biztos_callback(interaction):
         user = interaction.user
         team_data = active_teams[team_id]
 
-        # Előző választások törlése minden szerepből
+        selected_role = biztos_select.values[0] if biztos_select.values else None
+
+        # Ha újra rákattint az aktuális választására -> törlés
+        previous_role = None
         for r in roles:
             if user in team_data["members"][r]["Biztos"]:
-                team_data["members"][r]["Biztos"].remove(user)
-            if user in team_data["members"][r]["Csere"]:
-                team_data["members"][r]["Csere"].remove(user)
+                previous_role = r
+                break
+        if selected_role == previous_role:
+            team_data["members"][selected_role]["Biztos"].remove(user)
+        else:
+            if previous_role:
+                team_data["members"][previous_role]["Biztos"].remove(user)
+            if selected_role:
+                if len(team_data["members"][selected_role]["Biztos"]) < team_data["max"][selected_role]:
+                    team_data["members"][selected_role]["Biztos"].append(user)
 
-        # Új választások hozzáadása
-        for value in select.values:
-            status, role = value.split("|")
-            if status == "Biztos" and len(team_data["members"][role]["Biztos"]) < team_data["max"][role]:
-                team_data["members"][role]["Biztos"].append(user)
-            elif status == "Csere":
-                team_data["members"][role]["Csere"].append(user)
-
-        # Embed frissítése
         embed = create_embed(team_data["size"], team_data["max"], team_data["members"])
-        # Frissített view a Select-tel
-        await team_data["message"].edit(embed=embed, view=create_visual_names_view(team_data["max"], team_data["members"], team_id))
+        await team_data["message"].edit(embed=embed, view=create_dual_select_view(team_data["max"], team_data["members"], team_id))
         await interaction.response.defer()
 
-    select.callback = select_callback
-    view.add_item(select)
+    biztos_select.callback = biztos_callback
+    view.add_item(biztos_select)
+
+    # ---------------- Csere Select ----------------
+    csere_options = [discord.SelectOption(label=f"{role_emojis[r]} {r}", value=r) for r in roles]
+    csere_select = Select(
+        placeholder="🔄 Csere szerep választás",
+        options=csere_options,
+        min_values=0,
+        max_values=1
+    )
+
+    async def csere_callback(interaction):
+        user = interaction.user
+        team_data = active_teams[team_id]
+
+        selected_role = csere_select.values[0] if csere_select.values else None
+
+        # Ha újra rákattint az aktuális választására -> törlés
+        previous_role = None
+        for r in roles:
+            if user in team_data["members"][r]["Csere"]:
+                previous_role = r
+                break
+        if selected_role == previous_role:
+            team_data["members"][selected_role]["Csere"].remove(user)
+        else:
+            if previous_role:
+                team_data["members"][previous_role]["Csere"].remove(user)
+            if selected_role:
+                team_data["members"][selected_role]["Csere"].append(user)
+
+        embed = create_embed(team_data["size"], team_data["max"], team_data["members"])
+        await team_data["message"].edit(embed=embed, view=create_dual_select_view(team_data["max"], team_data["members"], team_id))
+        await interaction.response.defer()
+
+    csere_select.callback = csere_callback
+    view.add_item(csere_select)
+
     return view
 
 # ---------------- TEAM PARANCS ----------------
@@ -109,7 +137,7 @@ async def team(ctx, size: int, tank: int, dps: int, healer: int):
 
     embed = create_embed(size, max_roles, members_dict)
     msg = await ctx.send(embed=embed)
-    view = create_visual_names_view(max_roles, members_dict, msg.id)
+    view = create_dual_select_view(max_roles, members_dict, msg.id)
     await msg.edit(view=view)
 
     active_teams[msg.id] = {
