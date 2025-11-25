@@ -64,7 +64,6 @@ def create_dual_select_view(max_roles, members_dict, team_id):
 
         selected_role = biztos_select.values[0] if biztos_select.values else None
 
-        # Ha újra rákattint az aktuális választására -> törlés
         previous_role = None
         for r in roles:
             if user in team_data["members"][r]["Biztos"]:
@@ -101,7 +100,6 @@ def create_dual_select_view(max_roles, members_dict, team_id):
 
         selected_role = csere_select.values[0] if csere_select.values else None
 
-        # Ha újra rákattint az aktuális választására -> törlés
         previous_role = None
         for r in roles:
             if user in team_data["members"][r]["Csere"]:
@@ -126,11 +124,16 @@ def create_dual_select_view(max_roles, members_dict, team_id):
 
 # ---------------- TEAM PARANCS ----------------
 @bot.command()
-async def team(ctx, size: int, tank: int, dps: int, healer: int):
+async def team(ctx, size: int, tank: int, dps: int, healer: int, duration: int = 10):
+    """
+    duration: hány percig legyen aktív a keresés (alapértelmezett 10 perc)
+    """
     if size not in [5, 10]:
         return await ctx.send("Csak 5 vagy 10 fős csapat lehet!")
     if tank + dps + healer > size:
         return await ctx.send("A szerepek összege nem lehet nagyobb mint a csapat létszáma!")
+    if duration <= 0:
+        return await ctx.send("A keresés időtartama minimum 1 perc lehet!")
 
     max_roles = {"Tank": tank, "DPS": dps, "Healer": healer}
     members_dict = {r: {"Biztos": [], "Csere": []} for r in roles}
@@ -147,13 +150,67 @@ async def team(ctx, size: int, tank: int, dps: int, healer: int):
         "message": msg
     }
 
+    # ----------------- DM KÜLDÉSE WWM JÁTÉKOSOKNAK -----------------
+    wwm_role_name = "WWM Player"
+    guild = ctx.guild
+    role = discord.utils.get(guild.roles, name=wwm_role_name)
+    if role:
+        for member in role.members:
+            if not member.bot:
+                try:
+                    await member.send(f"🎮 Új csapatkeresés indult a szerveren: {ctx.channel.mention}")
+                except:
+                    print(f"Nem lehet DM-et küldeni: {member.display_name}")
+
+    # ----------------- AUTOMATIKUS LEZÁRÁS -----------------
+    async def auto_close():
+        await asyncio.sleep(duration * 60)
+        if msg.id in active_teams:
+            team_data = active_teams.pop(msg.id)
+            await send_close_message(ctx, team_data, duration)
+
+    asyncio.create_task(auto_close())
+
 # ---------------- CLOSE PARANCS ----------------
 @bot.command()
 async def close(ctx):
     if not active_teams:
         return await ctx.send("Nincs aktív csapat.")
-    team_id, team = active_teams.popitem()
-    text = "🎉 **Csapat lezárva!** 🎉\n\n"
+
+    if len(active_teams) == 1:
+        team_id, team = active_teams.popitem()
+        await send_close_message(ctx, team)
+        return
+
+    # Több aktív keresés esetén: Select menü
+    options = []
+    for msg_id, team in active_teams.items():
+        channel = team["message"].channel
+        options.append(discord.SelectOption(label=f"{channel.name} | {msg_id}", value=str(msg_id)))
+
+    select = Select(
+        placeholder="Válaszd ki, melyik csapatot zárjuk le",
+        options=options,
+        min_values=1,
+        max_values=1
+    )
+
+    async def select_callback(interaction):
+        chosen_id = int(select.values[0])
+        if chosen_id in active_teams:
+            team = active_teams.pop(chosen_id)
+            await send_close_message(ctx, team)
+        await interaction.response.defer()
+
+    select.callback = select_callback
+    view = View()
+    view.add_item(select)
+    await ctx.send("Válaszd ki a lezárandó csapatot:", view=view)
+
+async def send_close_message(ctx, team, duration=None):
+    text = f"🎉 **Csapat lezárva!** 🎉\n\n"
+    if duration:
+        text = f"⏹ **Csapatkeresés lejárt ({duration} perc)** ⏹\n\n"
     for role in roles:
         biztos = ", ".join([m.display_name for m in team["members"][role]["Biztos"]]) or "..."
         csere = ", ".join([m.display_name for m in team["members"][role]["Csere"]]) or "..."
