@@ -1,310 +1,290 @@
-# bot.py
-import os
-import asyncio
 import discord
 from discord.ext import commands
-from discord.ui import View, Button, Modal, TextInput, Select
+from discord.ui import View, Button, Select, Modal, TextInput
 from functools import partial
 from aiohttp import web, ClientSession
+import asyncio
+import os
 
-# ------------------- Bot setup -------------------
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ------------------- Konfiguráció -------------------
-ROLES = ["Tank", "DPS", "Healer"]
-STATUS_OPTIONS = ["Biztos", "Csere"]
-ROLE_EMOJI = {"Tank": "🛡️", "DPS": "⚔️", "Healer": "❤️"}
+roles = ["Tank", "DPS", "Healer"]
+status_options = ["Biztos", "Csere"]
+role_emojis = {"Tank": "🛡️", "DPS": "⚔️", "Healer": "❤️"}
 
-active_teams = {}      # message_id -> team data
-user_role_choice = {}  # user_id -> (message_id, role, status)
+active_teams = {}
+user_role_choice = {}
 
-# ------------------- Embed létrehozása -------------------
-def create_embed(size, max_roles, members_dict, start_day=None, start_time=None, end_day=None, end_time=None, description=None):
+def create_embed(size, max_roles, members_dict, start_time=None, start_day=None, end_time=None, end_day=None):
     embed = discord.Embed(
         title=f"🎯 {size}-fős Csapatkereső",
-        description=description or "Jelentkezz a szerepedre a gombokkal!",
+        description="Kattints a szerepre a jelentkezéshez:",
         color=0x3498db
     )
 
-    if start_day and start_time is not None:
-        embed.description += f"\n🕒 **Kezdés:** {start_day} {start_time}:00"
-    if end_day and end_time is not None:
-        embed.description += f"\n⏹ **Keresés vége:** {end_day} {end_time}:00"
+    if start_time and start_day:
+        embed.description += f"\n🕒 Kezdés: **{start_day} {start_time}:00**"
+
+    if end_time and end_day:
+        embed.description += f"\n⏹ Keresés vége: **{end_day} {end_time}:00**"
 
     biztos_field = ""
     csere_field = ""
 
-    for r in ROLES:
-        biztos_list = ", ".join([m.display_name for m in members_dict[r]["Biztos"]]) or "..."
-        csere_list = ", ".join([m.display_name for m in members_dict[r]["Csere"]]) or "..."
-        max_val = max_roles[r]
-        current = len(members_dict[r]["Biztos"])
+    for role in roles:
+        emoji = role_emojis[role]
+        biztos = ", ".join([m.display_name for m in members_dict[role]["Biztos"]]) or "..."
+        csere = ", ".join([m.display_name for m in members_dict[role]["Csere"]]) or "..."
 
-        if max_val > 0:
-            if current >= max_val:
-                bar = "🟥" * current + "⚪" * (max_val - current)
-            elif current / max_val >= 0.5:
-                bar = "🟨" * current + "⚪" * (max_val - current)
-            else:
-                bar = "🟩" * current + "⚪" * (max_val - current)
+        current = len(members_dict[role]["Biztos"])
+        max_val = max_roles[role]
+
+        if current >= max_val:
+            bar = "🟥" * current + "⚪" * (max_val - current)
+        elif current / max_val >= 0.5:
+            bar = "🟨" * current + "⚪" * (max_val - current)
         else:
-            bar = "⚪"
+            bar = "🟩" * current + "⚪" * (max_val - current)
 
-        biztos_field += f"{ROLE_EMOJI[r]} **{r}**\n{biztos_list}\n{bar}\n\n"
-        csere_field += f"{ROLE_EMOJI[r]} **{r}**\n{csere_list}\n\n"
+        biztos_field += f"{emoji} **{role}**: {biztos}\n{bar}\n"
+        csere_field += f"{emoji} **{role}**: {csere}\n"
 
-    embed.add_field(name="✅ Biztos", value=biztos_field, inline=True)
-    embed.add_field(name="🔄 Csere", value=csere_field, inline=True)
+    embed.add_field(name="✅ Biztos", value= biztos_field, inline=True)
+    embed.add_field(name="🔄 Csere", value= csere_field, inline=True)
     return embed
 
-# ------------------- Helper label/style -------------------
-def get_button_label(role, status, max_roles, members):
-    if status == "Biztos":
-        c = len(members[role]["Biztos"])
-        m = max_roles[role]
-        return f"{ROLE_EMOJI[role]} {role} - Biztos ({c}/{m})"
-    else:
-        c = len(members[role]["Csere"])
-        return f"{ROLE_EMOJI[role]} {role} - Csere ({c})"
 
-def get_button_style(role, status, max_roles, members):
+def get_button_style(role, status, max_roles, members_dict):
     if status == "Biztos":
-        current = len(members[role]["Biztos"])
-        maxv = max_roles[role]
-        if maxv == 0:
-            return discord.ButtonStyle.secondary
-        if current >= maxv:
+        current = len(members_dict[role]["Biztos"])
+        max_val = max_roles[role]
+        if current >= max_val:
             return discord.ButtonStyle.danger
-        elif current / maxv >= 0.5:
+        elif current / max_val >= 0.5:
             return discord.ButtonStyle.secondary
         else:
             return discord.ButtonStyle.success
     return discord.ButtonStyle.primary
 
-# ------------------- Button callback -------------------
-async def role_button_callback(interaction: discord.Interaction, message_id: int, role: str, status: str):
+
+def get_button_label(role, status, max_roles, members_dict):
+    emoji = role_emojis[role]
+    if status == "Biztos":
+        c = len(members_dict[role]["Biztos"])
+        m = max_roles[role]
+        return f"{emoji} {role} - Biztos ({c}/{m})"
+    else:
+        c = len(members_dict[role]["Csere"])
+        return f"{emoji} {role} - Csere ({c})"
+
+
+async def button_callback(interaction, role, status):
     user = interaction.user
-    team = active_teams.get(message_id)
-    if not team:
-        await interaction.response.send_message("Csapat nem található (lehet, hogy lejárt).", ephemeral=True)
+    team_data = active_teams.get(interaction.message.id)
+    if not team_data:
         return
 
-    members = team["members"]
-    # toggle
-    prev = user_role_choice.get(user.id)
-    if prev and prev[0] == message_id and (prev[1], prev[2]) == (role, status):
-        # eltávolítjuk
-        if user in members[role][status]:
-            members[role][status].remove(user)
-        user_role_choice.pop(user.id, None)
+    if user_role_choice.get(user.id) == (role, status):
+        team_data["members"][role][status].remove(user)
+        del user_role_choice[user.id]
     else:
-        # ha más szerepben volt, eltávolítjuk onnan
-        if prev and prev[0] == message_id:
-            pr, ps = prev[1], prev[2]
-            if user in members[pr][ps]:
-                members[pr][ps].remove(user)
-        # ha biztos tele van és újra biztosba akar menni -> cserebe tesszük
-        if status == "Biztos" and len(members[role]["Biztos"]) >= team["max"][role]:
-            members[role]["Csere"].append(user)
-            user_role_choice[user.id] = (message_id, role, "Csere")
-        else:
-            members[role][status].append(user)
-            user_role_choice[user.id] = (message_id, role, status)
+        if user.id in user_role_choice:
+            r, st = user_role_choice[user.id]
+            if user in team_data["members"][r][st]:
+                team_data["members"][r][st].remove(user)
 
-    # frissítjük az embedet és view-t
-    embed = create_embed(team["size"], team["max"], team["members"],
-                         start_day=team.get("start_day"), start_time=team.get("start_time"),
-                         end_day=team.get("end_day"), end_time=team.get("end_time"))
-    view = create_team_view(team["max"], team["members"], message_id)
-    await team["message"].edit(embed=embed, view=view)
+        if status == "Biztos" and len(team_data["members"][role]["Biztos"]) >= team_data["max"][role]:
+            team_data["members"][role]["Csere"].append(user)
+            user_role_choice[user.id] = (role, "Csere")
+        else:
+            team_data["members"][role][status].append(user)
+            user_role_choice[user.id] = (role, status)
+
+    embed = create_embed(
+        team_data["size"], team_data["max"], team_data["members"],
+        start_time=team_data["start_time"], start_day=team_data["start_day"],
+        end_time=team_data["end_time"], end_day=team_data["end_day"]
+    )
+
+    view = create_view(team_data["max"], team_data["members"], interaction.message.id)
+    await interaction.message.edit(embed=embed, view=view)
     await interaction.response.defer()
 
-# ------------------- Modal (dátum + óra) -------------------
-class DateTimeModal(Modal):
-    def __init__(self, message_id: int, purpose: str):
-        title = "Kezdés dátum+óra" if purpose == "start" else "Vége dátum+óra"
-        super().__init__(title=title)
-        self.message_id = message_id
+
+class DaySelectModal(Modal):
+    def __init__(self, team_id, purpose):
+        super().__init__(title="Dátum kiválasztása")
+        self.team_id = team_id
         self.purpose = purpose
-        # Dátum input
-        self.date = TextInput(label="Dátum (YYYY-MM-DD)", placeholder="2025-11-26", required=True, max_length=10)
-        # Óra input (0-23)
-        self.hour = TextInput(label="Óra (0-23)", placeholder="Pl.: 20", required=True, max_length=2)
-        self.add_item(self.date)
-        self.add_item(self.hour)
+        self.input = TextInput(label="Dátum (YYYY-MM-DD)", placeholder="Pl.: 2025-11-26")
+        self.add_item(self.input)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        team = active_teams.get(self.message_id)
-        if not team:
-            await interaction.response.send_message("Csapat nem található.", ephemeral=True)
-            return
-
-        # Validálás
-        date_val = self.date.value.strip()
-        hour_val = self.hour.value.strip()
-        try:
-            # egyszerű formátum ellenőrzés
-            parts = date_val.split("-")
-            if len(parts) != 3 or not all(p.isdigit() for p in parts):
-                raise ValueError("Hibás dátum formátum.")
-            y, m, d = map(int, parts)
-            if not (1 <= m <= 12 and 1 <= d <= 31):
-                raise ValueError("Hibás dátum.")
-            hour_int = int(hour_val)
-            if not (0 <= hour_int <= 23):
-                raise ValueError("Óra 0-23 között kell legyen.")
-        except Exception as e:
-            await interaction.response.send_message(f"Hibás input: {e}", ephemeral=True)
+    async def on_submit(self, interaction):
+        team_data = active_teams.get(self.team_id)
+        if not team_data:
             return
 
         if self.purpose == "start":
-            team["start_day"] = date_val
-            team["start_time"] = hour_int
+            team_data["start_day"] = self.input.value
         else:
-            team["end_day"] = date_val
-            team["end_time"] = hour_int
+            team_data["end_day"] = self.input.value
 
-        embed = create_embed(team["size"], team["max"], team["members"],
-                             start_day=team.get("start_day"), start_time=team.get("start_time"),
-                             end_day=team.get("end_day"), end_time=team.get("end_time"))
-        view = create_team_view(team["max"], team["members"], self.message_id)
-        await team["message"].edit(embed=embed, view=view)
-        await interaction.response.send_message("Időpont beállítva!", ephemeral=True)
+        embed = create_embed(
+            team_data["size"], team_data["max"], team_data["members"],
+            start_time=team_data["start_time"], start_day=team_data["start_day"],
+            end_time=team_data["end_time"], end_day=team_data["end_day"]
+        )
 
-# ------------------- View létrehozása -------------------
-def create_team_view(max_roles, members_dict, message_id):
+        view = create_view(team_data["max"], team_data["members"], self.team_id)
+        await team_data["message"].edit(embed=embed, view=view)
+
+        await interaction.response.send_message("Dátum beállítva!", ephemeral=True)
+
+
+def create_view(max_roles, members_dict, team_id):
     view = View(timeout=None)
 
-    # szerep gombok
-    for r in ROLES:
-        for s in STATUS_OPTIONS:
-            btn = Button(label=get_button_label(r, s, max_roles, members_dict),
-                         style=get_button_style(r, s, max_roles, members_dict))
-            # Closure-callback: pass message_id, role, status
-            btn.callback = partial(lambda inter, mid, role, status: asyncio.create_task(role_button_callback(inter, mid, role, status)),
-                                   message_id, r, s)
+    for role in roles:
+        for status in status_options:
+            btn = Button(
+                label=get_button_label(role, status, max_roles, members_dict),
+                style=get_button_style(role, status, max_roles, members_dict)
+            )
+            btn.callback = partial(button_callback, role=role, status=status)
             view.add_item(btn)
 
-    # kezdő dátum+óra modal gomb
-    start_btn = Button(label="📅 Kezdés dátum+óra", style=discord.ButtonStyle.primary)
-    async def start_btn_cb(inter: discord.Interaction):
-        await inter.response.send_modal(DateTimeModal(message_id, "start"))
-    start_btn.callback = start_btn_cb
-    view.add_item(start_btn)
+    start_day_btn = Button(label="📅 Kezdő nap", style=discord.ButtonStyle.primary)
+    start_day_btn.callback = lambda i: i.response.send_modal(DaySelectModal(team_id, "start"))
+    view.add_item(start_day_btn)
 
-    # vége dátum+óra modal gomb
-    end_btn = Button(label="⏹ Keresés vége dátum+óra", style=discord.ButtonStyle.danger)
-    async def end_btn_cb(inter: discord.Interaction):
-        await inter.response.send_modal(DateTimeModal(message_id, "end"))
-    end_btn.callback = end_btn_cb
-    view.add_item(end_btn)
+    end_day_btn = Button(label="⏹ Keresés vége nap", style=discord.ButtonStyle.danger)
+    end_day_btn.callback = lambda i: i.response.send_modal(DaySelectModal(team_id, "end"))
+    view.add_item(end_day_btn)
+
+    hours = [discord.SelectOption(label=f"{h}:00", value=str(h)) for h in range(24)]
+
+    start_hour = Select(placeholder="Kezdő óra", options=hours)
+    async def start_hour_callback(interaction):
+        team_data = active_teams[team_id]
+        team_data["start_time"] = start_hour.values[0]
+        embed = create_embed(
+            team_data["size"], team_data["max"], team_data["members"],
+            team_data["start_time"], team_data["start_day"],
+            team_data["end_time"], team_data["end_day"]
+        )
+        await team_data["message"].edit(embed=embed, view=create_view(max_roles, members_dict, team_id))
+        await interaction.response.send_message("Kezdő óra beállítva!", ephemeral=True)
+    start_hour.callback = start_hour_callback
+    view.add_item(start_hour)
+
+    end_hour = Select(placeholder="Vége óra", options=hours)
+    async def end_hour_callback(interaction):
+        team_data = active_teams[team_id]
+        team_data["end_time"] = end_hour.values[0]
+        embed = create_embed(
+            team_data["size"], team_data["max"], team_data["members"],
+            team_data["start_time"], team_data["start_day"],
+            team_data["end_time"], team_data["end_day"]
+        )
+        await team_data["message"].edit(embed=embed, view=create_view(max_roles, members_dict, team_id))
+        await interaction.response.send_message("Vége óra beállítva!", ephemeral=True)
+    end_hour.callback = end_hour_callback
+    view.add_item(end_hour)
 
     return view
 
-# ------------------- Parancs: team -------------------
+
 @bot.command()
-async def team(ctx, size: int, tank: int, dps: int, healer: int, *, description: str = None):
-    """
-    !team <size> <tank> <dps> <healer> [leírás]
-    """
-    if size not in (5, 10):
-        await ctx.send("Csak 5 vagy 10 fős csapat hozható létre.")
-        return
+async def team(ctx, size: int, tank: int, dps: int, healer: int):
+    if size not in [5, 10]:
+        return await ctx.send("Csak 5 vagy 10 fős csapat lehet!")
+
     if tank + dps + healer > size:
-        await ctx.send("A szerepek összege nem lehet nagyobb, mint a csapatméret.")
-        return
+        return await ctx.send("A szerepek összege nem lehet nagyobb mint a csapat létszáma!")
+
+    user_role_choice.clear()
 
     max_roles = {"Tank": tank, "DPS": dps, "Healer": healer}
-    members = {r: {"Biztos": [], "Csere": []} for r in ROLES}
+    members_dict = {r: {"Biztos": [], "Csere": []} for r in roles}
 
-    embed = create_embed(size, max_roles, members, description=description)
+    embed = create_embed(size, max_roles, members_dict)
     msg = await ctx.send(embed=embed)
 
-    view = create_team_view(max_roles, members, msg.id)
+    view = create_view(max_roles, members_dict, msg.id)
     await msg.edit(view=view)
 
     active_teams[msg.id] = {
         "size": size,
         "max": max_roles,
-        "members": members,
+        "members": members_dict,
         "message": msg,
-        "start_day": None,
         "start_time": None,
-        "end_day": None,
-        "end_time": None
+        "start_day": None,
+        "end_time": None,
+        "end_day": None
     }
 
-    await ctx.send("Csapat létrehozva! Kattints a gombokra a jelentkezéshez.")
 
-# ------------------- Parancs: close -------------------
 @bot.command()
 async def close(ctx):
     if not active_teams:
-        await ctx.send("Nincs aktív csapat.")
-        return
-    msg_id, team = active_teams.popitem()
-    user_role_choice_copy = {k:v for k,v in user_role_choice.items() if v[0] != msg_id}
-    # csak a másik csapatokra hagyjuk meg a választásokat
-    keys_to_remove = [k for k,v in user_role_choice.items() if v[0] == msg_id]
-    for k in keys_to_remove:
-        user_role_choice.pop(k, None)
+        return await ctx.send("Nincs aktív csapat.")
 
-    text = f"🎉 **Csapat ({team['size']}) lezárva!** 🎉\n\n"
-    for r in ROLES:
-        biztos = ", ".join([m.display_name for m in team["members"][r]["Biztos"]]) or "..."
-        csere = ", ".join([m.display_name for m in team["members"][r]["Csere"]]) or "..."
-        text += f"**{r}**\n✅ Biztos: {biztos}\n🔵 Csere: {csere}\n\n"
+    team_id, team = active_teams.popitem()
 
-    if team["start_day"] and team["start_time"] is not None:
+    text = "🎉 **Csapat lezárva!** 🎉\n\n"
+    for role in roles:
+        biztos = ", ".join([m.display_name for m in team["members"][role]["Biztos"]]) or "..."
+        csere = ", ".join([m.display_name for m in team["members"][role]["Csere"]]) or "..."
+        text += f"**{role}**\n✔ Biztos: {biztos}\n🔄 Csere: {csere}\n\n"
+
+    if team["start_day"] and team["start_time"]:
         text += f"🕒 Kezdés: {team['start_day']} {team['start_time']}:00\n"
-    if team["end_day"] and team["end_time"] is not None:
-        text += f"⏹ Keresés vége: {team['end_day']} {team['end_time']}:00\n"
+
+    if team["end_day"] and team["end_time"]:
+        text += f"⏹ Keresés vége: {team['end_day']} {team['end_time']}:00"
 
     await ctx.send(text)
 
-# ------------------- Dashboard (open port) -------------------
-async def run_dashboard():
+
+async def dashboard():
     app = web.Application()
-    async def root(req): return web.Response(text="Bot dashboard él!")
-    app.router.add_get("/", root)
+    app.router.add_get("/", lambda request: web.Response(text="Bot dashboard fut!"))
     runner = web.AppRunner(app)
     await runner.setup()
+
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"Dashboard fut a {port} porton.")
 
-# ------------------- Keep-alive (prevent sleep on Render) -------------------
+
 async def keep_alive():
-    url = os.environ.get("RENDER_EXTERNAL_URL")
+    url = os.environ.get("RENDER_EXTERNAL_URL", None)
     if not url:
-        print("RENDER_EXTERNAL_URL nincs beállítva — keep-alive nem fut.")
+        print("Nincs RENDER_EXTERNAL_URL beállítva.")
         return
+
     async with ClientSession() as session:
         while True:
             try:
                 async with session.get(url) as r:
-                    print("KeepAlive ping:", r.status)
+                    print("KeepAlive:", r.status)
             except Exception as e:
-                print("KeepAlive error:", e)
-            await asyncio.sleep(600)  # 10 perc
+                print("KeepAlive hiba:", e)
+            await asyncio.sleep(600)
 
-# ------------------- Main entry -------------------
+
 async def main():
-    # indítjuk a dashboardot és a keep-alive-t
-    asyncio.create_task(run_dashboard())
+    asyncio.create_task(dashboard())
     asyncio.create_task(keep_alive())
 
-    token = os.environ.get("DISCORD_TOKEN")
-    if not token:
-        print("HIBA: DISCORD_TOKEN nincs beállítva az environment változókban.")
-        return
-
-    # elindítjuk a botot
+    token = os.environ["DISCORD_TOKEN"]
     await bot.start(token)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+
+asyncio.run(main())
+
