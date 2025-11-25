@@ -6,21 +6,18 @@ from aiohttp import web, ClientSession
 import asyncio
 import os
 
-# ------------------- Intents -------------------
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ------------------- Konfiguráció -------------------
 roles = ["Tank", "DPS", "Healer"]
 status_options = ["Biztos", "Csere"]
 role_emojis = {"Tank": "🛡️", "DPS": "⚔️", "Healer": "❤️"}
 
 active_teams = {}
-user_role_choice = {}  # user_id -> (role, status)
+user_role_choice = {}
 
-# ------------------- Embed -------------------
 def create_embed(size, max_roles, members_dict, start_time=None, start_day=None, end_time=None, end_day=None):
     embed = discord.Embed(
         title=f"🎯 {size}-fős Csapatkereső",
@@ -55,11 +52,11 @@ def create_embed(size, max_roles, members_dict, start_time=None, start_day=None,
         biztos_field += f"{emoji} **{role}**: {biztos}\n{bar}\n"
         csere_field += f"{emoji} **{role}**: {csere}\n"
 
-    embed.add_field(name="✅ Biztos", value=biztos_field, inline=True)
-    embed.add_field(name="🔄 Csere", value=csere_field, inline=True)
+    embed.add_field(name="✅ Biztos", value= biztos_field, inline=True)
+    embed.add_field(name="🔄 Csere", value= csere_field, inline=True)
     return embed
 
-# ------------------- Button style/label -------------------
+
 def get_button_style(role, status, max_roles, members_dict):
     if status == "Biztos":
         current = len(members_dict[role]["Biztos"])
@@ -72,6 +69,7 @@ def get_button_style(role, status, max_roles, members_dict):
             return discord.ButtonStyle.success
     return discord.ButtonStyle.primary
 
+
 def get_button_label(role, status, max_roles, members_dict):
     emoji = role_emojis[role]
     if status == "Biztos":
@@ -82,26 +80,22 @@ def get_button_label(role, status, max_roles, members_dict):
         c = len(members_dict[role]["Csere"])
         return f"{emoji} {role} - Csere ({c})"
 
-# ------------------- Gomb callback -------------------
+
 async def button_callback(interaction, role, status):
     user = interaction.user
     team_data = active_teams.get(interaction.message.id)
-
     if not team_data:
         return
 
-    # Toggle logika
     if user_role_choice.get(user.id) == (role, status):
         team_data["members"][role][status].remove(user)
         del user_role_choice[user.id]
     else:
-        # előző törlése
         if user.id in user_role_choice:
             r, st = user_role_choice[user.id]
             if user in team_data["members"][r][st]:
                 team_data["members"][r][st].remove(user)
 
-        # Biztos hely tele → Csere-be rak
         if status == "Biztos" and len(team_data["members"][role]["Biztos"]) >= team_data["max"][role]:
             team_data["members"][role]["Csere"].append(user)
             user_role_choice[user.id] = (role, "Csere")
@@ -109,15 +103,17 @@ async def button_callback(interaction, role, status):
             team_data["members"][role][status].append(user)
             user_role_choice[user.id] = (role, status)
 
-    embed = create_embed(team_data["size"], team_data["max"], team_data["members"],
-                         start_time=team_data["start_time"], start_day=team_data["start_day"],
-                         end_time=team_data["end_time"], end_day=team_data["end_day"])
+    embed = create_embed(
+        team_data["size"], team_data["max"], team_data["members"],
+        start_time=team_data["start_time"], start_day=team_data["start_day"],
+        end_time=team_data["end_time"], end_day=team_data["end_day"]
+    )
 
     view = create_view(team_data["max"], team_data["members"], interaction.message.id)
     await interaction.message.edit(embed=embed, view=view)
     await interaction.response.defer()
 
-# ------------------- NAP MODAL -------------------
+
 class DaySelectModal(Modal):
     def __init__(self, team_id, purpose):
         super().__init__(title="Dátum kiválasztása")
@@ -136,20 +132,21 @@ class DaySelectModal(Modal):
         else:
             team_data["end_day"] = self.input.value
 
-        embed = create_embed(team_data["size"], team_data["max"], team_data["members"],
-                             start_time=team_data["start_time"], start_day=team_data["start_day"],
-                             end_time=team_data["end_time"], end_day=team_data["end_day"])
+        embed = create_embed(
+            team_data["size"], team_data["max"], team_data["members"],
+            start_time=team_data["start_time"], start_day=team_data["start_day"],
+            end_time=team_data["end_time"], end_day=team_data["end_day"]
+        )
 
         view = create_view(team_data["max"], team_data["members"], self.team_id)
         await team_data["message"].edit(embed=embed, view=view)
 
         await interaction.response.send_message("Dátum beállítva!", ephemeral=True)
 
-# ------------------- VIEW -------------------
+
 def create_view(max_roles, members_dict, team_id):
     view = View(timeout=None)
 
-    # szerep gombok
     for role in roles:
         for status in status_options:
             btn = Button(
@@ -159,54 +156,47 @@ def create_view(max_roles, members_dict, team_id):
             btn.callback = partial(button_callback, role=role, status=status)
             view.add_item(btn)
 
-    # kezdő nap modal
     start_day_btn = Button(label="📅 Kezdő nap", style=discord.ButtonStyle.primary)
     start_day_btn.callback = lambda i: i.response.send_modal(DaySelectModal(team_id, "start"))
     view.add_item(start_day_btn)
 
-    # vége nap modal
     end_day_btn = Button(label="⏹ Keresés vége nap", style=discord.ButtonStyle.danger)
     end_day_btn.callback = lambda i: i.response.send_modal(DaySelectModal(team_id, "end"))
     view.add_item(end_day_btn)
 
-    # kezdő óra
     hours = [discord.SelectOption(label=f"{h}:00", value=str(h)) for h in range(24)]
-    start_hour = Select(placeholder="Kezdő óra", options=hours)
 
+    start_hour = Select(placeholder="Kezdő óra", options=hours)
     async def start_hour_callback(interaction):
         team_data = active_teams[team_id]
         team_data["start_time"] = start_hour.values[0]
-
-        embed = create_embed(team_data["size"], team_data["max"], team_data["members"],
-                             start_time=team_data["start_time"], start_day=team_data["start_day"],
-                             end_time=team_data["end_time"], end_day=team_data["end_day"])
-
+        embed = create_embed(
+            team_data["size"], team_data["max"], team_data["members"],
+            team_data["start_time"], team_data["start_day"],
+            team_data["end_time"], team_data["end_day"]
+        )
         await team_data["message"].edit(embed=embed, view=create_view(max_roles, members_dict, team_id))
         await interaction.response.send_message("Kezdő óra beállítva!", ephemeral=True)
-
     start_hour.callback = start_hour_callback
     view.add_item(start_hour)
 
-    # vége óra
     end_hour = Select(placeholder="Vége óra", options=hours)
-
     async def end_hour_callback(interaction):
         team_data = active_teams[team_id]
         team_data["end_time"] = end_hour.values[0]
-
-        embed = create_embed(team_data["size"], team_data["max"], team_data["members"],
-                             start_time=team_data["start_time"], start_day=team_data["start_day"],
-                             end_time=team_data["end_time"], end_day=team_data["end_day"])
-
+        embed = create_embed(
+            team_data["size"], team_data["max"], team_data["members"],
+            team_data["start_time"], team_data["start_day"],
+            team_data["end_time"], team_data["end_day"]
+        )
         await team_data["message"].edit(embed=embed, view=create_view(max_roles, members_dict, team_id))
-        await interaction.response.send_message("Keresés vége óra beállítva!", ephemeral=True)
-
+        await interaction.response.send_message("Vége óra beállítva!", ephemeral=True)
     end_hour.callback = end_hour_callback
     view.add_item(end_hour)
 
     return view
 
-# ------------------- TEAM COMMAND -------------------
+
 @bot.command()
 async def team(ctx, size: int, tank: int, dps: int, healer: int):
     if size not in [5, 10]:
@@ -237,7 +227,7 @@ async def team(ctx, size: int, tank: int, dps: int, healer: int):
         "end_day": None
     }
 
-# ------------------- CLOSE COMMAND -------------------
+
 @bot.command()
 async def close(ctx):
     if not active_teams:
@@ -259,7 +249,7 @@ async def close(ctx):
 
     await ctx.send(text)
 
-# ------------------- Dashboard & KeepAlive -------------------
+
 async def dashboard():
     app = web.Application()
     app.router.add_get("/", lambda request: web.Response(text="Bot dashboard fut!"))
@@ -270,6 +260,7 @@ async def dashboard():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"Dashboard fut a {port} porton.")
+
 
 async def keep_alive():
     url = os.environ.get("RENDER_EXTERNAL_URL", None)
@@ -286,10 +277,13 @@ async def keep_alive():
                 print("KeepAlive hiba:", e)
             await asyncio.sleep(600)
 
-# ------------------- MAIN -------------------
+
 async def main():
     asyncio.create_task(dashboard())
     asyncio.create_task(keep_alive())
-    await bot.start("IDE_ÍRD_A_TOKENED")
+
+    token = os.environ["DISCORD_TOKEN"]
+    await bot.start(token)
+
 
 asyncio.run(main())
